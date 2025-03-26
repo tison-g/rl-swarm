@@ -12,12 +12,18 @@ Note that this code is experimental - particularly on arm64 architectures.
 
 Ensure you that you are using a supported machine/device/environment:
 
-- arm64 CPU with minimum 16gb ram
+- arm64 or x86 CPU with minimum 16gb ram
+
+OR
+
 - CUDA devices (officially supported):
     - RTX 3090
     - RTX 4090
     - A100
     - H100
+
+WITH
+
 -  Python >=3.10 (for Mac, you will likely need to upgrade)
 
 ## Instructions:
