@@ -1,25 +1,30 @@
 import itertools
-from collections import defaultdict
 import math
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import hivemind
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import GRPOConfig
 
+from hivemind_exp.dht_utils import (
+    HivemindNode,
+    leaderboard_key,
+    outputs_key,
+    rewards_key,
+)
+from hivemind_exp.hivemind_utils import SingleStageData, StageData
 from hivemind_exp.tests.fake_data import CK, QUESTION, RSK, SAMPLES
 from hivemind_exp.trainer.hivemind_grpo_trainer import (
     HivemindGRPOTrainer,
     get_dht_value,
 )
-from hivemind_exp.utils import SingleStageData, StageData
-from hivemind_exp.dht_utils import HivemindNode, leaderboard_key, outputs_key, rewards_key
-from concurrent.futures import ThreadPoolExecutor
 
 
 def dummy_reward_func(node: HivemindNode, prompts, completions, **kwargs) -> list[int]:
     node.outputs = {"question": prompts[0][-1]["content"]}
-    if node.is_coordinator():
+    if node.is_coordinator:
         rewards = [2]
     else:
         rewards = [1]
@@ -63,7 +68,7 @@ def create_dht_and_trainer(tmp_path, node, stage_data, max_steps=1, initial_peer
 
 
 def test_single_node_single_stage(tmp_path):
-    node = HivemindNode.coordinator("test")
+    node = HivemindNode.coordinator("test", CK)
 
     def reward_func(**kwargs):
         return dummy_reward_func(node, **kwargs)
@@ -73,6 +78,7 @@ def test_single_node_single_stage(tmp_path):
         node,
         StageData(
             max_rounds=1,
+            round_winner_fn=lambda:[CK],
             stages=[
                 SingleStageData(
                     name="0",
@@ -93,7 +99,7 @@ def test_single_node_multi_stage(tmp_path):
         completions["merged_0"] = True
         return SAMPLES, SAMPLES
 
-    node = HivemindNode.coordinator("test")
+    node = HivemindNode.coordinator("test", CK)
 
     def reward_func(**kwargs):
         return dummy_reward_func(node, **kwargs)
@@ -103,6 +109,7 @@ def test_single_node_multi_stage(tmp_path):
         node,
         StageData(
             max_rounds=1,
+            round_winner_fn=lambda:[CK],
             stages=[
                 SingleStageData(
                     name="0",
@@ -140,6 +147,7 @@ def test_multi_node_single_stage(tmp_path):
 
         return StageData(
             max_rounds=max_rounds,
+            round_winner_fn=lambda:[CK],
             stages=[
                 SingleStageData(
                     name="0",
@@ -149,8 +157,8 @@ def test_multi_node_single_stage(tmp_path):
             ],
         )
 
-    node0 = HivemindNode.coordinator("test")
-    node1 = HivemindNode("test")
+    node0 = HivemindNode.coordinator("test", CK)
+    node1 = HivemindNode("test", "0")
 
     dht0, trainer0 = create_dht_and_trainer(
         Path(tmp_path) / "0", node0, create_stage_data(node0), max_steps
@@ -170,7 +178,7 @@ def test_multi_node_single_stage(tmp_path):
     assert rs == (max_rounds - 1, 0)
 
     for r, s in itertools.product([0], [0]):
-        outputs = get_dht_value(dht0, key=outputs_key(node0.uuid, r, s), latest=True)
+        outputs = get_dht_value(dht0, key=outputs_key(node0.key, r, s), latest=True)
         assert outputs
         assert outputs[QUESTION][1] == {"question": QUESTION}
 
@@ -178,7 +186,7 @@ def test_multi_node_single_stage(tmp_path):
         assert rewards
         assert len(rewards) == 2
         assert math.isclose(rewards[CK], 2.0 * max_steps)
-        assert math.isclose(rewards[node1.uuid], max_steps)
+        assert math.isclose(rewards[node1.key], max_steps)
 
         leaderboard = get_dht_value(dht0, key=leaderboard_key(r, s), latest=True)
         assert leaderboard
@@ -207,6 +215,7 @@ def test_multi_node_multi_stage(tmp_path):
 
         return StageData(
             max_rounds=max_rounds,
+            round_winner_fn=lambda:[CK],
             stages=[
                 SingleStageData(
                     name="0",
@@ -226,8 +235,8 @@ def test_multi_node_multi_stage(tmp_path):
             ],
         )
 
-    node0 = HivemindNode.coordinator("test")
-    node1 = HivemindNode("test")
+    node0 = HivemindNode.coordinator("test", CK)
+    node1 = HivemindNode("test", "0")
 
     dht0, trainer0 = create_dht_and_trainer(
         Path(tmp_path) / "0", node0, create_stage_data(node0), max_steps
@@ -252,7 +261,7 @@ def test_multi_node_multi_stage(tmp_path):
     }
 
     for r, s in itertools.product(range(1), range(3)):
-        outputs = get_dht_value(dht0, key=outputs_key(node0.uuid, r, s), latest=False)
+        outputs = get_dht_value(dht0, key=outputs_key(node0.key, r, s), latest=False)
         assert outputs
         assert outputs[QUESTION][1] == {"question": QUESTION}
 
@@ -260,7 +269,7 @@ def test_multi_node_multi_stage(tmp_path):
         assert rewards
         assert len(rewards) == 2
         assert math.isclose(rewards[CK], 2.0 * max_steps)
-        assert math.isclose(rewards[node1.uuid], max_steps)
+        assert math.isclose(rewards[node1.key], max_steps)
 
         leaderboard = get_dht_value(dht0, key=leaderboard_key(r, s), latest=False)
         assert leaderboard

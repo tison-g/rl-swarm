@@ -1,9 +1,11 @@
+import os
+import random
 import re
-import os, random
+
 import numpy as np
 
-from hivemind_exp.utils import HivemindNode
 import hivemind_exp.gsm8k.stage1_rewards as stage1_rewards
+from hivemind_exp.hivemind_utils import HivemindNode
 
 
 def extract_xml_identity(text: str) -> str:
@@ -213,6 +215,37 @@ def xmlcount_reward_func(
             f.write(out_line)
     return [count_xml(c) * weighting for c in contents]
 
+def top_k_cumulative_reward(
+    prompts,
+    completions,
+    answer,
+    logging=False,
+    **kwargs,
+) -> list[float]:
+    """
+    Dummy reward function that accumulates all rewards into one for prompt generation's top_k selector
+    """
+    proper_id_reward = proper_id_reward_func(
+        prompts, completions, answer, logging=logging
+    )
+    correctness_reward = correctness_reward_func(
+        prompts, completions, answer, logging=logging
+    )
+    strict_format_reward = strict_format_reward_func(completions, logging=logging)
+    soft_format_reward = soft_format_reward_func(completions, logging=logging)
+    xmlcount_reward = xmlcount_reward_func(completions, logging=logging)
+    total_reward = [
+        sum(tup)
+        for tup in zip(
+            proper_id_reward,
+            correctness_reward,
+            strict_format_reward,
+            soft_format_reward,
+            xmlcount_reward,
+        )
+    ]
+    return total_reward
+
 
 def hivemind_cumulative_reward(
     node: HivemindNode,
@@ -257,7 +290,7 @@ def hivemind_cumulative_reward(
             "question": question,
             "answer": answer[0],
             "stage2_prompt": prompts[0][-1]["content"],
-            "agent_opinion": {node.uuid: responses[maximal_reward_idx]},
+            "agent_opinion": {node.key: responses[maximal_reward_idx]},
         }
 
     if output_signal_selector != None:

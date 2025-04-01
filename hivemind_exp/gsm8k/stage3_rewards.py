@@ -1,10 +1,12 @@
+import os
+import random
 import re
-import os, random
-import numpy as np
 from difflib import SequenceMatcher
 
-from hivemind_exp.utils import HivemindNode
+import numpy as np
+
 import hivemind_exp.gsm8k.stage1_rewards as stage1_rewards
+from hivemind_exp.hivemind_utils import HivemindNode
 
 
 def extract_xml_identity(text: str) -> str:
@@ -363,7 +365,7 @@ def hivemind_cumulative_reward(
             "question": question,
             "answer": answer[0],
             "stage3_prompt": prompt,
-            "final_agent_decision": {node.uuid: responses[maximal_reward_idx]},
+            "final_agent_decision": {node.key: responses[maximal_reward_idx]},
         }
 
     if output_signal_selector != None:

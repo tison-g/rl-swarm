@@ -1,8 +1,8 @@
 from copy import deepcopy
-from hivemind_exp.utils import COORDINATOR_KEY
+
 from hivemind_exp.dht_utils import ROUND_STAGE_NUMBER_KEY
 
-CK = COORDINATOR_KEY
+CK = "GENSYN"
 RSK = ROUND_STAGE_NUMBER_KEY
 
 QUESTION = "What is the meaning of life?"
@@ -33,19 +33,19 @@ SAMPLES = [
 ]
 
 
-def samples_with_uuid(new_uuid, orig_samples=SAMPLES, field="agent_answers"):
-    orig_uuids = (CK, "0", "1", "2")
+def samples_with_key(new_key, orig_samples=SAMPLES, field="agent_answers"):
+    orig_keys = (CK, "0", "1", "2")
 
     def replace(orig, value):
         if field in value:
             answers = value[field]
-            if orig != new_uuid and orig in answers:
-                answers[new_uuid] = answers[orig]
+            if orig != new_key and orig in answers:
+                answers[new_key] = answers[orig]
                 del answers[orig]
 
     samples = deepcopy(orig_samples)
     for sample in samples:
-        for orig in orig_uuids:
+        for orig in orig_keys:
             replace(orig, sample)
 
     return samples

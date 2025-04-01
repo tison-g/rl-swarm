@@ -1,43 +1,42 @@
-from enum import Enum
 import itertools
-from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 import time
+from concurrent.futures import ThreadPoolExecutor
+from enum import Enum
+from pathlib import Path
 
 import hivemind
 import pytest
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from trl import GRPOConfig
+from datasets import Dataset
 from hivemind.dht import DHT
 from hivemind.utils import get_dht_time
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from trl import GRPOConfig
 
-from datasets import Dataset
-
+from hivemind_exp.dht_utils import ROUND_STAGE_NUMBER_KEY, outputs_key
 from hivemind_exp.gsm8k.stage_utils import (
     HivemindNode,
-    merge_stage1_question,
-    merge_stage2_question,
     get_stage2_samples,
     get_stage3_samples,
     gsm8k_stage_data,
+    merge_stage1_question,
+    merge_stage2_question,
     merged_prev_stage_datasets,
     rewards_key,
 )
+from hivemind_exp.hivemind_utils import SingleStageData
 from hivemind_exp.tests.fake_data import (
     CK,
     QUESTION,
     RSK,
     SAMPLES,
-    STAGE_2_OUTPUTS,
     STAGE_2_MERGED,
-    samples_with_uuid,
+    STAGE_2_OUTPUTS,
+    samples_with_key,
 )
 from hivemind_exp.trainer.hivemind_grpo_trainer import (
     HivemindGRPOTrainer,
     get_dht_value,
 )
-from hivemind_exp.dht_utils import outputs_key
-from hivemind_exp.utils import SingleStageData
 
 TEST_MODEL_NAME = "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"
 
@@ -80,14 +79,14 @@ def create_dht_and_trainer(tmp_path, node, min_peers=1, initial_peers=[]):
     # Always check stage merging.
 
     def check_merged_stage1_dataset(dataset: Dataset):
-        # print(f"Merged stage 1 for: {node.uuid}", dataset)
+        # print(f"Merged stage 1 for: {node.key}", dataset)
         check_dataset("agent_answers", min_peers, dataset)
 
     def check_merged_stage2_dataset(dataset: Dataset):
-        # print(f"Merged stage 2 for: {node.uuid}", dataset)
+        # print(f"Merged stage 2 for: {node.key}", dataset)
         check_dataset("agent_opinion", min_peers, dataset)
 
-    stage_data = gsm8k_stage_data(dht, node, SAMPLES, SAMPLES)
+    stage_data = gsm8k_stage_data(dht, node, SAMPLES, SAMPLES, check_interval=1)
     stage_data.max_rounds = 1
     stage_data.stages[0].datasets_fn = lambda r, s: (SAMPLES, SAMPLES)  # type: ignore
     wrap_datasets_fn(stage_data.stages[1], check_merged_stage1_dataset)
@@ -104,11 +103,11 @@ def create_dht_and_trainer(tmp_path, node, min_peers=1, initial_peers=[]):
     return dht, trainer
 
 
-def store_dummy_rewards(dht: DHT, uuids, r, s):
-    for uuid in uuids:
+def store_dummy_rewards(dht: DHT, keys, r, s):
+    for key in keys:
         dht.store(
             key=rewards_key(r, s),
-            subkey=uuid,
+            subkey=key,
             value=[99],
             expiration_time=get_dht_time() + 60,
         )
@@ -125,7 +124,7 @@ def store_stage_outputs(
 ):
     if storage_mode in (StorageMode.DHT, StorageMode.BOTH):
         dht.store(
-            key=outputs_key(node.uuid, r, s),
+            key=outputs_key(node.key, r, s),
             subkey=QUESTION,
             value=(0, value),
             expiration_time=get_dht_time() + 120,
@@ -167,8 +166,8 @@ def test_merged_prev_stage_datasets(
     merge_fn, sample_fn, stage, samples, group_field, get_expected_fn
 ):
     dht = hivemind.DHT(start=True)
-    coord = HivemindNode.coordinator("test")
-    node = HivemindNode("test")
+    coord = HivemindNode.coordinator("test", CK)
+    node = HivemindNode("test", "0")
 
     def merge_coord():
         return merged_prev_stage_datasets(dht, coord, 0, stage + 1, merge_fn, sample_fn)
@@ -181,13 +180,13 @@ def test_merged_prev_stage_datasets(
         _ = merge_coord()
 
     # Training loop saves to both.
-    coord_samples = samples_with_uuid(CK, samples, group_field)
+    coord_samples = samples_with_key(CK, samples, group_field)
     store_stage_outputs(dht, coord, 0, stage, coord_samples[0], StorageMode.DHT)
     store_stage_outputs(
         dht, coord, 0, stage, coord_samples[1], StorageMode.NODE
     )  # Takes precedence.
 
-    node_samples = samples_with_uuid(node.uuid, samples, group_field)
+    node_samples = samples_with_key(node.key, samples, group_field)
     store_stage_outputs(
         dht, node, 0, stage, node_samples[0], StorageMode.NODE
     )  # Local only.
@@ -198,28 +197,28 @@ def test_merged_prev_stage_datasets(
 
     # Local.
     assert cf[f"{group_field}_{CK}"] == coord_expected
-    assert f"{group_field}_{node.uuid}" not in cf
+    assert f"{group_field}_{node.key}" not in cf
 
     # Local.
     assert f"{group_field}_{CK}" not in nf
-    assert nf[f"{group_field}_{node.uuid}"] == node_expected
+    assert nf[f"{group_field}_{node.key}"] == node_expected
 
     ## Check merged outputs with visible rewards!
-    store_dummy_rewards(dht, [coord.uuid, node.uuid], 0, stage)
+    store_dummy_rewards(dht, [coord.key, node.key], 0, stage)
     cf, nf = merge_coord()[0][0], merge_node()[0][0]
 
     # Local.
     assert cf[f"{group_field}_{CK}"] == coord_expected
-    assert f"{group_field}_{node.uuid}" not in cf
+    assert f"{group_field}_{node.key}" not in cf
 
     # Local + DHT.
     assert nf[f"{group_field}_{CK}"] == node_expected
-    assert nf[f"{group_field}_{node.uuid}"] == node_expected
+    assert nf[f"{group_field}_{node.key}"] == node_expected
 
 
 def test_gsm8k_stage_data(tmp_path):
-    coord = HivemindNode.coordinator("test")
-    nodes = [HivemindNode("test") for _ in range(3)]
+    coord = HivemindNode.coordinator("test", CK)
+    nodes = [HivemindNode("test", str(i)) for i in range(3)]
 
     dht_trainers = [create_dht_and_trainer(Path(tmp_path) / "C", coord, min_peers=2)]
     dht0 = dht_trainers[0][0]
@@ -266,18 +265,35 @@ def test_gsm8k_stage_data(tmp_path):
 
         for i in range(len(nodes)):
             check_outputs(
-                get_dht_value(dht0, key=outputs_key(nodes[i].uuid, r, s), latest=True),
+                get_dht_value(dht0, key=outputs_key(nodes[i].key, r, s), latest=True),
                 checks,
             )
 
         rewards = get_dht_value(dht0, key=rewards_key(r, s), latest=True)
         assert rewards
-        assert rewards.keys() == set([CK] + [node.uuid for node in nodes])
+        assert rewards.keys() == set([CK] + [node.key for node in nodes])
 
+
+def test_gsm8k_follower_no_outputs(tmp_path):
+    node = HivemindNode.coordinator("test", CK)
+    dht, trainer = create_dht_and_trainer(Path(tmp_path) / "0", node)
+
+    dht.store(
+        key=ROUND_STAGE_NUMBER_KEY,
+        value=(0, 1),
+        expiration_time=get_dht_time() + node.out_expiration,
+    )
+    # It is possible for a node to see no local + no DHT outputs. Restarting at stage 0
+    # ensures that we have >1 examples for each stage.
+    trainer.follower_train(0.1)
+
+    # Check stage 0 outputs.
+    outputs = get_dht_value(dht, key=outputs_key(CK, 0, 0), latest=True)
+    assert outputs is not None
 
 def test_gsm8k_delayed_join(tmp_path):
-    node0 = HivemindNode.coordinator("test")
-    node1 = HivemindNode("test")
+    node0 = HivemindNode.coordinator("test", CK)
+    node1 = HivemindNode("test", "0")
 
     dht0, trainer0 = create_dht_and_trainer(Path(tmp_path) / "0", node0)
     dht1, trainer1 = create_dht_and_trainer(
@@ -302,11 +318,11 @@ def test_gsm8k_delayed_join(tmp_path):
     assert rs == (0, 2)  # 1 round, 3 stages
 
     for r, s in itertools.product(range(1), range(3)):
-        outputs0 = get_dht_value(dht1, key=outputs_key(node0.uuid, r, s), latest=True)
+        outputs0 = get_dht_value(dht1, key=outputs_key(node0.key, r, s), latest=True)
         assert outputs0
 
         if s > 0:
             outputs1 = get_dht_value(
-                dht0, key=outputs_key(node1.uuid, r, s), latest=True
+                dht0, key=outputs_key(node1.key, r, s), latest=True
             )
             assert outputs1

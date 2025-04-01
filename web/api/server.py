@@ -1,30 +1,27 @@
-import aiofiles
 import argparse
-from datetime import datetime, timedelta
-import hivemind
 import logging
-from threading import Thread
-import multiprocessing
-from .server_cache import Cache
-from fastapi import FastAPI, Query, Request, Response, HTTPException
-from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
-import uvicorn
-import httpx
 import os
 import time
+from datetime import datetime, timedelta
+from threading import Thread
+
+import aiofiles
+from hivemind_exp.chain_utils import ModalSwarmCoordinator, setup_web3
+import httpx
+import uvicorn
+from fastapi import FastAPI, HTTPException, Request, Response, Query
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+import json
 
 from hivemind_exp.dht_utils import *
+from hivemind_exp.name_utils import *
+
+from . import global_dht
 
 # UI is served from the filesystem
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DIST_DIR = os.path.join(BASE_DIR, "ui", "dist")
-
-# DHT singleton for the client
-# Initialized in main and used in the API handlers.
-dht: hivemind.DHT | None = None
-
-dht_cache: Cache
 
 index_html = None
 
@@ -79,10 +76,7 @@ async def internal_server_error_handler(request: Request, exc: Exception):
 
 @app.get("/api/healthz")
 async def get_health():
-    global dht_cache
-    assert dht_cache
-
-    lpt = dht_cache.get_last_polled()
+    lpt = global_dht.dht_cache.get_last_polled()
     if lpt is None:
         raise HTTPException(status_code=500, detail="dht never polled")
 
@@ -96,21 +90,100 @@ async def get_health():
     }
 
 
+@app.get("/api/round_and_stage")
+def get_round_and_stage():
+    r, s = global_dht.dht_cache.get_round_and_stage()
+
+    return {
+        "round": r,
+        "stage": s,
+    }
+
+
 @app.get("/api/leaderboard")
 def get_leaderboard():
-    global dht_cache
-    assert dht_cache
+    leaderboard = global_dht.dht_cache.get_leaderboard()
+    res = dict(leaderboard)
 
-    leaderboard = dht_cache.get_leaderboard()
-    return dict(leaderboard)
+    if res is not None:
+        return {
+            "leaders": res.get("leaders", []),
+            "total": res.get("total", 0),
+        }
 
+
+@app.get("/api/rewards-history")
+def get_rewards_history():
+    leaderboard = global_dht.dht_cache.get_leaderboard()
+    res = dict(leaderboard)
+
+    if res is not None:
+        return {
+            "leaders": res.get("rewardsHistory", []),
+        }
+
+
+@app.get("/api/name-to-id")
+def get_id_from_name(name: str = Query("")):
+	leaderboard = global_dht.dht_cache.get_leaderboard()
+	leader_ids = [leader["id"] for leader in leaderboard["leaders"]] or []
+
+	peer_id = search_peer_ids_for_name(leader_ids, name)
+	return {
+		"id": peer_id,
+	}
+
+@app.post("/api/id-to-name")
+async def id_to_name(request: Request):
+    # Check request body size (100KB limit)
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > 100 * 1024:  # 100KB in bytes
+        raise HTTPException(
+            status_code=413,
+            detail="Request body too large. Maximum size is 100KB."
+        )
+
+    # Parse request body
+    try:
+        body = await request.json()
+        if not isinstance(body, list):
+            raise HTTPException(
+                status_code=400,
+                detail="Request body must be a list of peer IDs"
+            )
+    except json.JSONDecodeError as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid JSON: {str(e)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid request body: {str(e)}"
+        )
+
+    # Validate input size
+    if len(body) > 1000:  # Limit number of IDs that can be processed
+        raise HTTPException(
+            status_code=400,
+            detail="Too many peer IDs. Maximum is 1000."
+        )
+
+    # Process each ID
+    id_to_name_map = {}
+    for peer_id in body:
+        try:
+            name = get_name_from_peer_id(peer_id)
+            if name is not None:
+                id_to_name_map[peer_id] = name
+        except Exception as e:
+            logger.error(f"Error looking up name for peer ID {peer_id}: {str(e)}")
+
+    return id_to_name_map
 
 @app.get("/api/gossip")
-def get_gossip(since_round: int = Query(0)):
-    global dht_cache
-    assert dht_cache
-
-    gs = dht_cache.get_gossips()
+def get_gossip():
+    gs = global_dht.dht_cache.get_gossips()
     return dict(gs)
 
 
@@ -173,32 +246,23 @@ def parse_arguments():
 
 def populate_cache():
     logger.info("populate_cache initialized")
-    global dht_cache
-    assert dht_cache
-
     try:
         while True:
             logger.info("pulling latest dht data...")
-            dht_cache.poll_dht()
+            global_dht.dht_cache.poll_dht()
             time.sleep(10)
+            logger.info("dht polled")
     except Exception as e:
         logger.error("uncaught exception while polling dht", e)
 
 
 def main(args):
-    global dht
-    global dht_cache
-
-    # Allows either an environment variable for peering or fallback to command line args.
-    initial_peers_env = os.getenv("INITIAL_PEERS", "")
-    initial_peers_list = (
-        initial_peers_env.split(",") if initial_peers_env else args.initial_peers
-    )
+    coordinator = ModalSwarmCoordinator("", web3=setup_web3()) # Only allows contract calls
+    initial_peers = coordinator.get_bootnodes()
 
     # Supplied with the bootstrap node, the client will have access to the DHT.
-    logger.info(f"initializing DHT with peers {initial_peers_list}")
-    dht = hivemind.DHT(start=True, initial_peers=initial_peers_list)
-    dht_cache = Cache(dht, multiprocessing.Manager(), logger)
+    logger.info(f"initializing DHT with peers {initial_peers}")
+    global_dht.setup_global_dht(initial_peers, coordinator, logger)
 
     thread = Thread(target=populate_cache)
     thread.daemon = True
